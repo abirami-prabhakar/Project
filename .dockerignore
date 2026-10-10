@@ -1,0 +1,9 @@
+TerraformFiles/
+.git/
+.docker-ci/
+*.pem
+*.key
+*.md
+*.png
+Jenkinsfile*
+.env*

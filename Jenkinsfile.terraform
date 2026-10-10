@@ -1,0 +1,59 @@
+pipeline {
+    agent any
+    options { disableConcurrentBuilds() }
+    parameters {
+        string(name: 'STATE_BUCKET', defaultValue: '', description: 'Existing S3 state bucket in us-east-1')
+        string(name: 'EC2_KEY_NAME', defaultValue: 'project-pep-key', description: 'Existing EC2 key pair in us-east-1')
+        string(name: 'UBUNTU_AMI', defaultValue: '', description: 'Ubuntu x86_64 AMI ID for us-east-1')
+        booleanParam(name: 'APPLY', defaultValue: false, description: 'Create/update AWS resources; unchecked runs a plan only')
+    }
+    environment {
+        TF_IN_AUTOMATION = 'true'
+        AWS_DEFAULT_REGION = 'us-east-1'
+        TF_VAR_key_name = "${params.EC2_KEY_NAME}"
+        TF_VAR_ubuntu_ami = "${params.UBUNTU_AMI}"
+    }
+    stages {
+        stage('Checkout') { steps { checkout scm } }
+        stage('Terraform init, validate and plan') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'aws-login', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    dir('TerraformFiles') {
+                        powershell '''
+                            $ErrorActionPreference = 'Stop'
+                            if ($env:STATE_BUCKET -notmatch '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$') { throw 'Enter an existing S3 STATE_BUCKET.' }
+                            if ($env:TF_VAR_ubuntu_ami -notmatch '^ami-[0-9a-f]+$') { throw 'Enter a valid Ubuntu AMI ID for us-east-1.' }
+                            terraform init -input=false "-backend-config=bucket=$env:STATE_BUCKET"
+                            if ($LASTEXITCODE -ne 0) { throw 'terraform init failed' }
+                            terraform validate
+                            if ($LASTEXITCODE -ne 0) { throw 'terraform validate failed' }
+                            terraform plan -input=false -lock-timeout=5m -out=jenkins.tfplan
+                            if ($LASTEXITCODE -ne 0) { throw 'terraform plan failed' }
+                        '''
+                    }
+                }
+            }
+        }
+        stage('Terraform apply and EC2 addresses') {
+            when { expression { params.APPLY } }
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'aws-login', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    dir('TerraformFiles') {
+                        powershell '''
+                            $ErrorActionPreference = 'Stop'
+                            terraform apply -input=false -lock-timeout=5m jenkins.tfplan
+                            if ($LASTEXITCODE -ne 0) { throw 'terraform apply failed' }
+                            terraform output
+                            if ($LASTEXITCODE -ne 0) { throw 'terraform output failed' }
+                        '''
+                    }
+                }
+            }
+        }
+    }
+    post {
+        always {
+            powershell "Remove-Item -LiteralPath 'TerraformFiles/jenkins.tfplan' -Force -ErrorAction SilentlyContinue; exit 0"
+        }
+    }
+}
